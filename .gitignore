@@ -9,3 +9,6 @@ __pycache__/
 
 # 모든 .log 파일 제외
 *.log
+
+#OpenAI key 제외
+.env
