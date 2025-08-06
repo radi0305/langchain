@@ -1,0 +1,11 @@
+# Python 가상 환경 폴더 제외
+.venv/
+
+# Python 캐시 폴더 제외
+__pycache__/
+
+# macOS 시스템 파일 제외
+.DS_Store
+
+# 모든 .log 파일 제외
+*.log
