@@ -337,6 +337,20 @@ class DonguiRAGSystem:
             # 전통 방식에서도 자동 저장
             self.save_results(query, search_results, answer)
 
+        # 🆕 관련 검색어 선택 처리 추가 (맨 끝에 추가)
+        if display_options.get('show_related_queries', False):
+            # 관련 검색어 제안이 표시되었으면 사용자 선택 받기
+            categorized_suggestions = self.answer_generator.suggest_related_queries(
+                query, search_results)
+            if categorized_suggestions:
+                selected_query = self.answer_generator.get_user_choice_for_suggestions(
+                    categorized_suggestions)
+                if selected_query and selected_query != query:
+                    print(f"\n🔄 '{selected_query}'로 새로운 검색을 시작합니다...")
+                    # 재귀 호출로 새로운 검색 실행
+                    self._process_query(selected_query, k, display_options)
+                    return  # 여기서 리턴해서 아래 코드 실행 방지
+
     def _handle_related_query_selection(self, query: str, search_results: List[Dict], k: int, display_options: dict) -> Optional[str]:
         """관련 검색어 선택 처리"""
         categorized_suggestions = self.answer_generator.suggest_related_queries(
@@ -633,82 +647,8 @@ class DonguiRAGSystem:
                 # 검색 및 답변 생성 (관련 검색어 포함)
                 self._process_query(query, selected_k, display_options)
 
-                # 🆕 관련 검색어 선택 처리
-                if display_options.get('show_related_queries', False):
-                    while True:
-                        print("\n" + "🔍" * 25)
-                        related_choice = input(
-                            "🔄 관련 검색어로 계속 검색하시겠습니까? (y/n/번호 입력): ").strip()
-
-                        if related_choice.lower() in ['n', 'no', 'ㄴ', '아니오', '아니요']:
-                            break
-                        elif related_choice.lower() in ['y', 'yes', 'ㅇ', '네', '예']:
-                            # 최근 검색 결과를 기반으로 관련 검색어 다시 표시
-                            recent_results = self.search(query, k=selected_k)
-                            if recent_results:
-                                categorized_suggestions = self.answer_generator.suggest_related_queries(
-                                    query, recent_results)
-                                if categorized_suggestions:
-                                    print("\n💡 관련 검색어 목록:")
-                                    suggestion_count = 1
-                                    all_suggestions = []
-
-                                    for category, suggestions in categorized_suggestions.items():
-                                        if suggestions:
-                                            print(f"\n{category}:")
-                                            for suggestion in suggestions:
-                                                print(
-                                                    f"   {suggestion_count}. {suggestion}")
-                                                all_suggestions.append(
-                                                    suggestion)
-                                                suggestion_count += 1
-
-                                    choice_input = input(
-                                        f"\n선택 (1-{len(all_suggestions)} 또는 직접 입력): ").strip()
-
-                                    if choice_input.isdigit() and 1 <= int(choice_input) <= len(all_suggestions):
-                                        new_query = all_suggestions[int(
-                                            choice_input) - 1]
-                                        print(f"✅ '{new_query}'로 검색을 시작합니다.")
-                                        self._process_query(
-                                            new_query, selected_k, display_options)
-                                        query = new_query  # 다음 관련 검색을 위해 query 업데이트
-                                    elif choice_input:
-                                        print(
-                                            f"✅ '{choice_input}'로 새로운 검색을 시작합니다.")
-                                        self._process_query(
-                                            choice_input, selected_k, display_options)
-                                        query = choice_input  # 다음 관련 검색을 위해 query 업데이트
-                                    else:
-                                        break
-                                else:
-                                    print("💭 관련 검색어를 찾을 수 없습니다.")
-                                    break
-                            else:
-                                break
-                        elif related_choice.isdigit():
-                            # 직접 번호 입력 처리
-                            recent_results = self.search(query, k=selected_k)
-                            if recent_results:
-                                categorized_suggestions = self.answer_generator.suggest_related_queries(
-                                    query, recent_results)
-                                all_suggestions = []
-                                for suggestions in categorized_suggestions.values():
-                                    all_suggestions.extend(suggestions)
-
-                                choice_num = int(related_choice)
-                                if 1 <= choice_num <= len(all_suggestions):
-                                    new_query = all_suggestions[choice_num - 1]
-                                    print(f"✅ '{new_query}'로 검색을 시작합니다.")
-                                    self._process_query(
-                                        new_query, selected_k, display_options)
-                                    query = new_query
-                                else:
-                                    print(
-                                        f"❌ 1-{len(all_suggestions)} 범위의 번호를 입력해주세요.")
-                            break
-                        else:
-                            print("y, n, 또는 번호를 입력해주세요.")
+                # 🗑️ 기존의 중복된 관련 검색어 처리 부분 완전 삭제
+                # (모든 관련 검색어 처리는 이제 _process_query에서 담당)
 
                 # 계속 검색할지 확인
                 if not self.answer_generator.get_continue_choice():

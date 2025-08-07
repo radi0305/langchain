@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-답변 생성 모듈 - answer_generator.py (관련 검색어 제안 기능 추가)
+답변 생성 모듈 - answer_generator.py (관련 검색어 제안 기능 개선)
 LLM을 이용한 답변 생성과 결과 저장을 담당
 검색 결과 그룹핑, 카테고리별 표시 및 품질 메트릭 분석 기능
-관련 검색어 제안 기능 추가
+관련 검색어 제안 기능 추가 - 처방명/병증 추출 로직 개선
 """
 
 import os
@@ -24,17 +24,27 @@ class AnswerGenerator:
         self.save_path = Path(save_path)
         self.save_path.mkdir(parents=True, exist_ok=True)
 
-        # 관련 검색어 추출을 위한 패턴들
+        # 개선된 관련 검색어 추출을 위한 패턴들
         self.prescription_patterns = [
-            r'([一-龯]{2,6}[湯散丸膏])',  # 처방명 패턴
-            r'([一-龯]{3,8})'           # 일반 처방명
+            r'([一-龯]{2,8}[湯散丸膏元丹])',  # 전형적인 처방 접미사
+            r'([一-龯]{2,6}飮)',            # ~飮 (예: 四物飮)
+            r'([一-龯]{2,6}方)',            # ~방 (예: 逍遙方)
         ]
 
+        # 개선: 병증과 치료법을 구분하는 패턴들
         self.symptom_patterns = [
-            r'([一-龯]{2,4}[證病症])',    # 증상/병증 패턴
-            r'([一-龯]{1,3}[虛實])',     # 허실 패턴
-            r'([一-龯]{2,4}[痛])',       # 통증 패턴
-            r'([一-龯]{2,4}[熱寒])',     # 한열 패턴
+            r'([一-龯]{2,4}[證病症])',      # 명확한 병증 패턴
+            r'([一-龯]{1,3}[虛實])',       # 허실 패턴
+            r'([一-龯]{2,4}[痛])',         # 통증 패턴
+            r'([一-龯]{2,4}[熱寒濕燥])',   # 한열습조 패턴
+            r'([一-龯]{2,4}[脹滿悶])',     # 창만민 패턴
+        ]
+
+        # 치료법 패턴 (병증과 구분용)
+        self.treatment_patterns = [
+            r'治([一-龯]{1,4})',           # 治~ 패턴
+            r'主治([一-龯]{2,6})',         # 主治~ 패턴
+            r'療([一-龯]{2,4})',           # 療~ 패턴
         ]
 
         self.herb_patterns = [
@@ -82,15 +92,14 @@ class AnswerGenerator:
 
         return self.llm_manager.generate_response(messages)
 
-    def suggest_related_queries(self, query: str, results: List[Dict], max_suggestions: int = 8) -> List[str]:
-        """관련 검색어 제안 기능"""
-        suggestions = []
+    def suggest_related_queries(self, query: str, results: List[Dict], max_suggestions: int = 8) -> Dict[str, List[str]]:
+        """관련 검색어 제안 기능 (개선된 버전)"""
+        # 1. 검색 결과에서 처방명 추출 (개선된 로직)
+        prescriptions = self._extract_prescriptions_from_results_improved(
+            results)
 
-        # 1. 검색 결과에서 처방명 추출
-        prescriptions = self._extract_prescriptions_from_results(results)
-
-        # 2. 관련 증상/병증 추출
-        symptoms = self._extract_symptoms_from_results(results)
+        # 2. 관련 증상/병증 추출 (개선된 로직)
+        symptoms = self._extract_symptoms_from_results_improved(results)
 
         # 3. 관련 약재 추출
         herbs = self._extract_herbs_from_results(results)
@@ -98,17 +107,18 @@ class AnswerGenerator:
         # 4. 관련 이론/개념 추출
         concepts = self._extract_concepts_from_results(results)
 
-        # 5. 컨텍스트 기반 추천 (현재 검색어와 관련성 고려)
+        # 5. 컨텍스트 기반 추천
         contextual_suggestions = self._get_contextual_suggestions(
             query, results)
 
-        # 우선순위별로 추천 목록 구성
+        # 개선된 분류 로직으로 카테고리별 제안 구성
         suggestion_categories = [
-            ("🔥 핵심 처방", prescriptions[:2]),
-            ("🩺 관련 병증", symptoms[:2]),
-            ("💊 주요 약재", herbs[:2]),
-            ("📚 관련 개념", concepts[:1]),
-            ("🎯 맞춤 제안", contextual_suggestions[:1])
+            ("🔥 핵심 처방", [
+             p for p in prescriptions if self._is_actual_prescription_improved(p)][:3]),
+            ("🩺 관련 병증", [s for s in symptoms if self._is_actual_symptom(s)][:3]),
+            ("💊 주요 약재", [h for h in herbs if self._is_herb_name(h)][:3]),
+            ("📚 관련 개념", concepts[:2]),
+            ("🎯 맞춤 제안", contextual_suggestions[:2])
         ]
 
         # 카테고리별로 제안사항 수집
@@ -117,7 +127,6 @@ class AnswerGenerator:
 
         for category, items in suggestion_categories:
             if items:
-                # 중복 제거 및 현재 검색어와 다른 것만 선택
                 filtered_items = []
                 for item in items:
                     if (item not in all_suggestions and
@@ -131,55 +140,223 @@ class AnswerGenerator:
 
         return categorized_suggestions
 
-    def _extract_prescriptions_from_results(self, results: List[Dict]) -> List[str]:
-        """검색 결과에서 처방명 추출"""
-        prescriptions = []
+    def _extract_prescriptions_from_results_improved(self, results: List[Dict]) -> List[str]:
+        """개선된 처방명 추출 (문제 1 해결)"""
         prescription_counts = Counter()
 
         for result in results:
-            # 메타데이터에서 처방명 직접 추출
+            # 1순위: 메타데이터의 DP 레벨 처방명 (가장 확실)
             if result['metadata'].get('prescription_name'):
-                prescription_counts[result['metadata']
-                                    ['prescription_name']] += 3
+                dp_prescription = result['metadata']['prescription_name']
+                # DP 레벨은 높은 가중치
+                prescription_counts[dp_prescription] += 5
 
-            # 내용에서 처방명 패턴 매칭
+            # 2순위: 내용에서 처방 패턴 매칭 (개선된 로직)
             content = result['content']
+
+            # 개선된 처방 패턴으로 추출
             for pattern in self.prescription_patterns:
                 matches = re.findall(pattern, content)
                 for match in matches:
                     if len(match) >= 3:  # 최소 3글자 이상
-                        prescription_counts[match] += 1
+                        prescription_counts[match] += 2
 
-        # 빈도순으로 정렬하여 상위 항목 반환
-        return [name for name, count in prescription_counts.most_common(6) if count >= 2]
+            # 추가: '~子' 처방 패턴 (DP 레벨에서 나오는 경우만)
+            # DP 마커 근처에 있는 '~子'만 처방으로 인정
+            if 'DP' in content:
+                dp_sections = re.split(r'DP', content)
+                for section in dp_sections[1:]:  # DP 이후 섹션들만
+                    # DP 직후 50자 이내에서 ~子 패턴 찾기
+                    first_part = section[:50]
+                    zi_matches = re.findall(r'([一-龯]{2,4}子)', first_part)
+                    for match in zi_matches:
+                        # 처방 context 확인 (湯, 散, 丸 등이 같이 언급되거나 처방 설명이 있는 경우)
+                        if self._has_prescription_context(section[:200], match):
+                            prescription_counts[match] += 3
 
-    def _extract_symptoms_from_results(self, results: List[Dict]) -> List[str]:
-        """검색 결과에서 증상/병증 추출"""
-        symptoms = []
+        # 빈도순으로 정렬하여 상위 항목 추출
+        raw_prescriptions = [
+            name for name, count in prescription_counts.most_common(20) if count >= 2]
+
+        # 개선된 필터링 적용
+        filtered_prescriptions = []
+        for prescription in raw_prescriptions:
+            if (self._is_meaningful_prescription_term(prescription) and
+                    self._is_actual_prescription_improved(prescription)):
+                filtered_prescriptions.append(prescription)
+
+        print(
+            f"🔍 처방 추출: {len(raw_prescriptions)}개 → 필터링 후 {len(filtered_prescriptions)}개")
+        return filtered_prescriptions[:6]
+
+    def _has_prescription_context(self, text: str, term: str) -> bool:
+        """처방 컨텍스트 확인 (처방인지 단순 약재인지 구분)"""
+        # 처방 관련 키워드가 근처에 있는지 확인
+        prescription_keywords = [
+            '治', '主治', '方', '湯', '散', '丸', '膏', '飮', '丹', '元',
+            '服', '煎', '用法', '분량', '右', '右爲末', '右剉'
+        ]
+
+        # term 주변 50자 내에서 처방 키워드 찾기
+        term_pos = text.find(term)
+        if term_pos == -1:
+            return False
+
+        start = max(0, term_pos - 25)
+        end = min(len(text), term_pos + len(term) + 25)
+        context = text[start:end]
+
+        return any(keyword in context for keyword in prescription_keywords)
+
+    def _is_actual_prescription_improved(self, term: str) -> bool:
+        """개선된 실제 처방명 판단 (문제 1 해결)"""
+        # 1. 전형적인 처방 패턴
+        import re
+        prescription_patterns = [
+            r'.*[湯散丸膏元丹]$',  # 전형적인 처방 형태
+            r'.*飮$',              # ~飮
+            r'.*方$',              # ~방
+        ]
+
+        for pattern in prescription_patterns:
+            if re.match(pattern, term):
+                return True
+
+        # 2. '~子' 처방의 경우: 길이와 컨텍스트로 판단
+        if term.endswith('子'):
+            # 3글자 이상이고 알려진 처방명이면 허용
+            if len(term) >= 3:
+                known_zi_prescriptions = [
+                    '逍遙子', '甘露子', '紫雪子', '至寶子', '牛黃子',
+                    '局方子', '金櫃子', '千金子', '外科子'
+                ]
+                # 정확한 매칭 또는 패턴 매칭
+                return term in known_zi_prescriptions or len(term) >= 4
+
+        # 3. 알려진 처방명 리스트 (추가 확인)
+        known_prescriptions = [
+            '小建中湯', '二陳湯', '四君子湯', '四物湯', '六君子湯', '補中益氣湯',
+            '當歸補血湯', '犀角地黃湯', '安神定志丸', '天王補心丹', '朱砂安神丸'
+        ]
+
+        return term in known_prescriptions
+
+    def _extract_symptoms_from_results_improved(self, results: List[Dict]) -> List[str]:
+        """개선된 증상/병증 추출 (문제 2 해결)"""
         symptom_counts = Counter()
+        treatment_extracted_symptoms = Counter()  # 치료법에서 추출된 병증들
 
         for result in results:
             content = result['content']
 
-            # 증상/병증 패턴 매칭
+            # 1. 직접적인 병증 패턴 매칭
             for pattern in self.symptom_patterns:
                 matches = re.findall(pattern, content)
                 for match in matches:
                     if len(match) >= 2:
-                        symptom_counts[match] += 1
+                        symptom_counts[match] += 2
 
-            # 특정 키워드 기반 추출
-            symptom_keywords = ['驚悸', '健忘', '眩暈', '失眠', '虛勞', '血虛',
-                                '氣虛', '陰虛', '陽虛', '脾胃虛', '心悸', '不寐', '頭痛', '腹痛', '胸痛']
-            for keyword in symptom_keywords:
+            # 2. 치료법 패턴에서 병증 추출 (개선된 로직)
+            for pattern in self.treatment_patterns:
+                matches = re.findall(pattern, content)
+                for match in matches:
+                    if len(match) >= 2 and self._is_valid_symptom_from_treatment(match):
+                        # 치료법에서 추출된 것은 별도 카운트 (가중치 낮음)
+                        treatment_extracted_symptoms[match] += 1
+
+            # 3. 특정 키워드 기반 추출 (명확한 병증만)
+            clear_symptom_keywords = [
+                '驚悸', '健忘', '眩暈', '失眠', '虛勞', '血虛', '氣虛', '陰虛', '陽虛',
+                '脾胃虛', '心悸', '不寐', '頭痛', '腹痛', '胸痛', '癲癇', '中風', '咳嗽',
+                '哮喘', '泄瀉', '便秘', '黃疸', '水腫', '淋病', '崩漏', '帶下'
+            ]
+            for keyword in clear_symptom_keywords:
                 if keyword in content:
-                    symptom_counts[keyword] += 2
+                    symptom_counts[keyword] += 3
 
-        return [symptom for symptom, count in symptom_counts.most_common(8) if count >= 2]
+        # 치료법에서 추출된 병증들을 메인 카운트에 추가 (낮은 가중치)
+        for symptom, count in treatment_extracted_symptoms.items():
+            # 이미 직접 추출된 병증이 아닌 경우만 추가
+            if symptom not in symptom_counts:
+                symptom_counts[symptom] += count * 0.5  # 가중치 절반
+
+        # 빈도순 정렬 후 필터링 적용
+        raw_symptoms = [symptom for symptom,
+                        count in symptom_counts.most_common(15) if count >= 1.5]
+
+        # 개선된 필터링: 실제 병증만 선별
+        filtered_symptoms = []
+        for symptom in raw_symptoms:
+            if self._is_actual_symptom(symptom):
+                filtered_symptoms.append(symptom)
+
+        print(
+            f"🔍 증상 추출: {len(raw_symptoms)}개 → 필터링 후 {len(filtered_symptoms)}개")
+        return filtered_symptoms[:8]
+
+    def _is_valid_symptom_from_treatment(self, term: str) -> bool:
+        """치료법에서 추출된 용어가 유효한 병증인지 판단"""
+        # 치료 동작이 아닌 실제 병증인지 확인
+        invalid_treatment_terms = [
+            '病', '症', '疾', '患', '療', '癒', '愈', '效', '驗', '止', '除', '去', '消',
+            '散', '解', '破', '下', '上', '中', '內', '外', '表', '裏', '虛', '實'
+        ]
+
+        # 단일 글자이거나 치료 동작 용어면 제외
+        if len(term) == 1 or term in invalid_treatment_terms:
+            return False
+
+        # 명확한 병증 접미사가 있으면 허용
+        valid_symptom_suffixes = ['虛', '實', '熱',
+                                  '寒', '濕', '燥', '痛', '悸', '暈', '眠']
+        if any(term.endswith(suffix) for suffix in valid_symptom_suffixes):
+            return True
+
+        # 알려진 병증명이면 허용
+        known_symptoms = [
+            '간허', '신허', '기허', '혈허', '심허', '폐허', '비허', '위허',
+            '간열', '심열', '폐열', '위열', '간기울결', '심기부족'
+        ]
+
+        return term in known_symptoms or len(term) >= 2
+
+    def _is_actual_symptom(self, term: str) -> bool:
+        """실제 병증인지 판단 (개선된 로직)"""
+        # 치료법 관련 용어들 제외
+        treatment_terms = [
+            '治虛', '治實', '治熱', '治寒', '治痛', '治病', '治療', '主治',
+            '療虛', '療實', '補虛', '瀉實', '清熱', '溫寒', '止痛',
+            '治法', '用法', '服法', '煎法'
+        ]
+
+        if term in treatment_terms:
+            return False
+
+        # 명확한 병증 패턴들
+        symptom_patterns = [
+            r'.*[虛實]$',      # ~허, ~실
+            r'.*[痛]$',        # ~통
+            r'.*[熱寒]$',      # ~열, ~한
+            r'.*[證病症]$',    # ~증, ~병, ~증
+            r'.*[悸暈眠]$',    # ~계, ~훈, ~면
+        ]
+
+        import re
+        for pattern in symptom_patterns:
+            if re.match(pattern, term):
+                return True
+
+        # 알려진 명확한 병증명들
+        clear_symptoms = [
+            '驚悸', '健忘', '眩暈', '失眠', '虛勞', '血虛', '氣虛', '陰虛', '陽虛',
+            '心悸', '不寐', '頭痛', '腹痛', '胸痛', '癲癇', '中風', '咳嗽', '哮喘',
+            '泄瀉', '便秘', '黃疸', '水腫', '崩漏', '帶下', '遺精', '陽痿', '早泄'
+        ]
+
+        return term in clear_symptoms
 
     def _extract_herbs_from_results(self, results: List[Dict]) -> List[str]:
         """검색 결과에서 약재명 추출"""
-        herbs = []
         herb_counts = Counter()
 
         # 주요 약재 리스트
@@ -202,11 +379,16 @@ class AnswerGenerator:
                     else:
                         herb_counts[herb] += 1
 
-        return [herb for herb, count in herb_counts.most_common(8) if count >= 2]
+        # 빈도순 정렬 후 필터링 적용
+        raw_herbs = [herb for herb,
+                     count in herb_counts.most_common(15) if count >= 2]
+        filtered_herbs = self._filter_prescription_suggestions(raw_herbs)
+
+        print(f"🔍 약재 추출: {len(raw_herbs)}개 → 필터링 후 {len(filtered_herbs)}개")
+        return filtered_herbs[:8]
 
     def _extract_concepts_from_results(self, results: List[Dict]) -> List[str]:
         """검색 결과에서 이론/개념 추출"""
-        concepts = []
         concept_counts = Counter()
 
         # 중의학 핵심 개념들
@@ -232,7 +414,14 @@ class AnswerGenerator:
                 if concept in content:
                     concept_counts[concept] += 1
 
-        return [concept for concept, count in concept_counts.most_common(5) if count >= 2]
+        # 빈도순 정렬 후 필터링 적용
+        raw_concepts = [concept for concept,
+                        count in concept_counts.most_common(10) if count >= 2]
+        filtered_concepts = self._filter_prescription_suggestions(raw_concepts)
+
+        print(
+            f"🔍 개념 추출: {len(raw_concepts)}개 → 필터링 후 {len(filtered_concepts)}개")
+        return filtered_concepts[:5]
 
     def _get_contextual_suggestions(self, query: str, results: List[Dict]) -> List[str]:
         """컨텍스트 기반 맞춤 제안"""
@@ -242,22 +431,18 @@ class AnswerGenerator:
         if '虛' in query:
             suggestions.extend(['補益', '溫陽', '滋陰', '益氣'])
         elif '湯' in query:
-            suggestions.extend(['加減方', '배합금기', '용법용량'])
+            suggestions.extend(['加減방', '배합금기', '용법용량'])
         elif '病' in query or '證' in query:
-            suggestions.extend(['治療方법', '감별진단', '병리기전'])
+            suggestions.extend(['治療방법', '감별진단', '병리기전'])
         elif any(herb in query for herb in ['人參', '當歸', '川芎']):
             suggestions.extend(['약성', '귀경', '효능주치', '배합'])
 
         # 2. 검색 결과 메타데이터 기반 제안
-        source_files = set()
-        bb_categories = set()
-
         for result in results:
             source_file = result['metadata'].get('source_file', '')
             bb = result['metadata'].get('BB', '')
 
             if source_file:
-                # 파일명에서 관련 주제 추출
                 if '내경편' in source_file:
                     suggestions.append('정신요법')
                 elif '외형편' in source_file:
@@ -267,9 +452,7 @@ class AnswerGenerator:
                 elif '탕액편' in source_file:
                     suggestions.append('본초학')
 
-            if bb and bb not in bb_categories:
-                bb_categories.add(bb)
-                # BB 카테고리 기반 관련 주제 제안
+            if bb:
                 if bb == '血':
                     suggestions.extend(['補血', '活血', '止血'])
                 elif bb == '氣':
@@ -279,18 +462,62 @@ class AnswerGenerator:
 
         # 3. 빈도 기반 필터링
         suggestion_counts = Counter(suggestions)
-        return [suggestion for suggestion, count in suggestion_counts.most_common(3)]
+        raw_suggestions = [suggestion for suggestion,
+                           count in suggestion_counts.most_common(8)]
+        filtered_suggestions = self._filter_prescription_suggestions(
+            raw_suggestions)
+
+        print(
+            f"🔍 맥락 제안: {len(raw_suggestions)}개 → 필터링 후 {len(filtered_suggestions)}개")
+        return filtered_suggestions[:3]
+
+    def _is_herb_name(self, term: str) -> bool:
+        """약재명인지 판단"""
+        common_herbs = [
+            '人參', '當歸', '川芎', '白芍', '熟地黃', '生地黃', '黃芪', '白朮',
+            '茯苓', '甘草', '陳皮', '半夏', '枳實', '厚朴', '桔梗', '杏仁',
+            '麥門冬', '五味子', '山藥', '茯神', '遠志', '石菖蒲', '朱砂', '龍骨',
+            '牡蠣', '酸棗仁', '柏子仁', '阿膠', '地骨皮', '知母', '黃柏', '山茱萸',
+            '桂枝', '麻黃', '附子', '乾薑', '細辛', '防風', '荊芥', '薄荷',
+            '木通', '車前子', '滑石', '琥珀', '赤茯苓', '澤瀉', '猪苓'
+        ]
+        return term in common_herbs
+
+    def _is_meaningful_prescription_term(self, term: str) -> bool:
+        """처방명으로 의미있는 용어인지 판단"""
+        if len(term) < 2:
+            return False
+
+        # 제외할 패턴들
+        exclude_patterns = [
+            r'^右.*', r'.*爲末$', r'.*剉$', r'.*煎服$', r'.*調下$',
+            r'^空心.*', r'^每服.*', r'^各.*', r'.*錢$', r'.*兩$',
+            r'^《.*》$', r'^[一二三四五六七八九십]+[錢兩分]$',
+            r'^[治療用服取入加或及同以]$'
+        ]
+
+        for pattern in exclude_patterns:
+            if re.match(pattern, term):
+                return False
+
+        return True
+
+    def _filter_prescription_suggestions(self, suggestions: List[str]) -> List[str]:
+        """무의미한 용어들 필터링"""
+        filtered = []
+        for suggestion in suggestions:
+            if self._is_meaningful_prescription_term(suggestion):
+                filtered.append(suggestion)
+        return filtered
 
     def _is_too_similar_to_query(self, query: str, suggestion: str) -> bool:
         """제안어가 검색어와 너무 유사한지 확인"""
         if query in suggestion or suggestion in query:
             return True
 
-        # 글자 겹침 비율 확인
         common_chars = set(query) & set(suggestion)
         similarity_ratio = len(common_chars) / \
             max(len(set(query)), len(set(suggestion)))
-
         return similarity_ratio > 0.8
 
     def display_related_queries(self, query: str, results: List[Dict]):
@@ -323,7 +550,6 @@ class AnswerGenerator:
         if not categorized_suggestions:
             return None
 
-        # 모든 제안사항을 평평한 리스트로 변환
         all_suggestions = []
         for suggestions in categorized_suggestions.values():
             all_suggestions.extend(suggestions)
@@ -336,10 +562,9 @@ class AnswerGenerator:
                 choice = input(
                     "\n🤔 선택하세요 (번호 입력 또는 새 검색어 입력, Enter로 건너뛰기): ").strip()
 
-                if not choice:  # Enter로 건너뛰기
+                if not choice:
                     return None
 
-                # 숫자 입력 처리
                 if choice.isdigit():
                     choice_num = int(choice)
                     if 1 <= choice_num <= len(all_suggestions):
@@ -349,8 +574,6 @@ class AnswerGenerator:
                     else:
                         print(f"❌ 1~{len(all_suggestions)} 범위의 번호를 입력해주세요.")
                         continue
-
-                # 직접 입력된 검색어 처리
                 else:
                     print(f"✅ '{choice}'로 새로운 검색을 시작합니다.")
                     return choice

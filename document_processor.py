@@ -241,26 +241,43 @@ class DocumentProcessor:
         }
 
     def extract_prescription_keywords(self, prescription_name: str, content: List[str]) -> List[str]:
-        """처방 전용 키워드 추출"""
+        """처방 전용 키워드 추출 (기본 필터링만 적용)"""
         keywords = [prescription_name]
         full_text = ' '.join(content)
 
         # 약재명 패턴 매칭
         herb_patterns = [
             r'([一-龯]{2,4})\s*(?:各|每|用|取)',
-            r'([一-龯]{2,4})\s*[一二三四五六七八九十百千만]\s*[錢兩分斤]',
+            r'([一-龯]{2,4})\s*[一二三四五六七八九십백천만]\s*[錢兩分斤]',
         ]
 
+        raw_keywords = []
         for pattern in herb_patterns:
             matches = re.findall(pattern, full_text)
-            keywords.extend(matches)
+            raw_keywords.extend(matches)
 
-        # 증상 키워드 추출
-        for term_list in self.tcm_terms.values():
-            for term in term_list:
-                if term in full_text:
-                    keywords.append(term)
+        # 기본 중의학 용어 사전 사용
+        basic_tcm_terms = [
+            '驚悸', '健忘', '癲癇', '眩暈', '失眠', '虛勞', '血虛', '氣虛',
+            '人參', '當歸', '川芎', '白芍', '熟地黃', '생지황', '黃芪', '茯苓',
+            '陰陽', '五行', '臟腑', '氣血', '經絡', '精氣神'
+        ]
 
+        for term in basic_tcm_terms:
+            if term in full_text:
+                raw_keywords.append(term)
+
+        # 기본적인 무의미한 용어들만 제거 (간단한 필터링)
+        exclude_basic = ['右爲末', '右剉', '水煎服', '各등분', '一錢', '二錢', '三錢', '治', '用']
+
+        filtered_keywords = []
+        for keyword in raw_keywords:
+            if (len(keyword) >= 2 and
+                keyword not in exclude_basic and
+                    keyword != prescription_name):
+                filtered_keywords.append(keyword)
+
+        keywords.extend(filtered_keywords)
         return list(set(keywords))[:15]
 
     def finalize_chunk(self, chunk: Dict, context: Dict) -> Dict:
